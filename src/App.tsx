@@ -9,18 +9,72 @@ import {
   useSensors,
   type DragEndEvent,
   type DragStartEvent,
+  type DropAnimation,
 } from '@dnd-kit/core';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
-import { GRID_SLOTS, MAX_SHORTCUTS, SEARCH_PROVIDERS } from './constants';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type TransitionEvent,
+} from 'react';
+import {
+  DEFAULT_SEARCH_SLOT,
+  GRID_COLUMNS,
+  GRID_ROWS,
+  GRID_SLOTS,
+  MAX_SHORTCUTS,
+  SEARCH_DRAG_HOLD_MS,
+  SEARCH_DRAG_TOLERANCE_PX,
+  SEARCH_PROVIDERS,
+  SEARCH_WIDGET_COLUMNS,
+} from './constants';
 import { ShortcutIcon } from './components/ShortcutIcon';
+import { positionToSlot, reflowShortcutsForSearch, searchWidgetSlots, slotToPosition } from './lib/layout';
 import { buildSearchUrl } from './lib/search';
 import { firstEmptySlot, moveOrSwapShortcut, nameFromUrl, normalizeShortcutUrl, ShortcutValidationError } from './lib/shortcuts';
-import { loadAppData, saveSearchProvider, saveShortcuts } from './storage/appStorage';
+import { loadAppData, saveLayout, saveSearchProvider, saveShortcuts } from './storage/appStorage';
 import { deleteCustomIcon, processCustomIcon, saveCustomIcon } from './storage/iconStore';
 import { cleanupWallpaperFiles, deleteWallpaper, importWallpaper, loadWallpaperFile, WallpaperError } from './storage/wallpaperStore';
 import type { IconMode, SearchProviderId, Shortcut, WallpaperMetadata, WallpaperType } from './types';
 
 interface ContextState { shortcut: Shortcut; x: number; y: number }
+interface SearchLayout { searchSlot: number; shortcuts: Shortcut[] }
+interface SearchDragSession {
+  pointerId: number;
+  timerId: number;
+  activated: boolean;
+  startX: number;
+  startY: number;
+  offsetX: number;
+  offsetY: number;
+  origin: SearchLayout;
+  input: HTMLInputElement;
+}
+
+const shortcutDropAnimation: DropAnimation = {
+  duration: 220,
+  easing: 'cubic-bezier(.2, .72, .2, 1)',
+  sideEffects: ({ active, dragOverlay }) => {
+    const activeOpacity = active.node.style.opacity;
+    const overlayOpacity = dragOverlay.node.style.opacity;
+    active.node.style.opacity = '0';
+    dragOverlay.node.style.opacity = '1';
+
+    return () => {
+      dragOverlay.node.style.opacity = overlayOpacity;
+      window.requestAnimationFrame(() => {
+        if (active.node.style.opacity === '0') active.node.style.opacity = activeOpacity;
+      });
+    };
+  },
+};
 
 function GearIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.55-2-3.46-2.47 1a7.5 7.5 0 0 0-1.73-1L14.82 3h-4l-.38 3a7.5 7.5 0 0 0-1.73 1l-2.47-1-2 3.46 2 1.55a7.7 7.7 0 0 0 0 2l-2 1.55 2 3.46 2.47-1a7.5 7.5 0 0 0 1.73 1l.38 3h4l.38-3a7.5 7.5 0 0 0 1.73-1l2.47 1 2-3.46L19.4 13ZM12.82 15.4a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" /></svg>;
@@ -63,17 +117,60 @@ function DraggableShortcut({ shortcut, onContextMenu, onOpen }: {
   );
 }
 
-function GridSlot({ slot, shortcut, onContextMenu, onOpen }: {
-  slot: number;
-  shortcut?: Shortcut;
+function gridPlacement(slot: number, columnSpan = 1): CSSProperties {
+  const { column, row } = slotToPosition(slot);
+  return { gridColumn: `${column + 1} / span ${columnSpan}`, gridRow: row + 1 };
+}
+
+function useGridMoveAnimation(slot: number, skipAnimation = false, duration = 260) {
+  const nodeRef = useRef<HTMLDivElement>(null);
+  const previousRect = useRef<DOMRect | null>(null);
+
+  useLayoutEffect(() => {
+    const node = nodeRef.current;
+    if (!node) return;
+    node.getAnimations().forEach((animation) => animation.cancel());
+    const nextRect = node.getBoundingClientRect();
+    const previous = previousRect.current;
+    previousRect.current = nextRect;
+    if (!previous || skipAnimation || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const x = previous.left - nextRect.left;
+    const y = previous.top - nextRect.top;
+    if (Math.abs(x) < 1 && Math.abs(y) < 1) return;
+    node.animate(
+      [{ transform: `translate3d(${x}px, ${y}px, 0)` }, { transform: 'translate3d(0, 0, 0)' }],
+      { duration, easing: 'cubic-bezier(.2, .72, .2, 1)' },
+    );
+  }, [duration, skipAnimation, slot]);
+
+  return nodeRef;
+}
+
+function PositionedShortcut({ shortcut, skipLayoutAnimation, onContextMenu, onOpen }: {
+  shortcut: Shortcut;
+  skipLayoutAnimation: boolean;
   onContextMenu: (event: MouseEvent, shortcut: Shortcut) => void;
   onOpen: (shortcut: Shortcut) => void;
 }) {
+  const layoutRef = useGridMoveAnimation(shortcut.slot, skipLayoutAnimation);
+  return (
+    <div ref={layoutRef} className="shortcutPosition" style={gridPlacement(shortcut.slot)}>
+      <DraggableShortcut shortcut={shortcut} onContextMenu={onContextMenu} onOpen={onOpen} />
+    </div>
+  );
+}
+
+function GridSlot({ slot, reserved }: {
+  slot: number;
+  reserved: boolean;
+}) {
   const { setNodeRef, isOver } = useDroppable({ id: `slot-${slot}`, data: { slot } });
   return (
-    <div ref={setNodeRef} className={`gridSlot${isOver ? ' slotOver' : ''}`}>
-      {shortcut && <DraggableShortcut shortcut={shortcut} onContextMenu={onContextMenu} onOpen={onOpen} />}
-    </div>
+    <div
+      ref={setNodeRef}
+      className={`gridSlot${isOver ? ' slotOver' : ''}${reserved ? ' reserved' : ''}`}
+      style={gridPlacement(slot)}
+    />
   );
 }
 
@@ -83,25 +180,77 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [providerOpen, setProviderOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsMounted, setSettingsMounted] = useState(false);
   const [shortcuts, setShortcuts] = useState<Shortcut[]>([]);
+  const [searchSlot, setSearchSlot] = useState(DEFAULT_SEARCH_SLOT);
+  const [searchPreview, setSearchPreview] = useState<SearchLayout | null>(null);
+  const [searchHolding, setSearchHolding] = useState(false);
+  const [searchDragging, setSearchDragging] = useState(false);
   const [wallpaper, setWallpaper] = useState<WallpaperMetadata | null>(null);
   const [wallpaperUrl, setWallpaperUrl] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [settlingShortcutId, setSettlingShortcutId] = useState<string | null>(null);
+  const [gridLift, setGridLift] = useState(0);
   const [contextMenu, setContextMenu] = useState<ContextState | null>(null);
   const [renameTarget, setRenameTarget] = useState<Shortcut | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Shortcut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const justDragged = useRef(false);
+  const suppressSearchClick = useRef(false);
+  const searchDragSession = useRef<SearchDragSession | null>(null);
+  const searchPreviewRef = useRef<SearchLayout | null>(null);
+  const desktopGridRef = useRef<HTMLDivElement>(null);
+  const gridLiftRef = useRef(0);
+  const searchWidgetRef = useRef<HTMLDivElement>(null);
   const providerMenuRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 7 } }));
 
+  useLayoutEffect(() => {
+    const grid = desktopGridRef.current;
+    if (!grid) return;
+    const updateLift = () => {
+      const rect = grid.getBoundingClientRect();
+      const rowGap = Number.parseFloat(window.getComputedStyle(grid).rowGap) || 0;
+      const rowHeight = (rect.height - rowGap * (GRID_ROWS - 1)) / GRID_ROWS;
+      const naturalTop = rect.top + gridLiftRef.current;
+      const nextLift = Math.round(Math.max(0, Math.min(rowHeight + rowGap, naturalTop - 12)));
+      if (Math.abs(nextLift - gridLiftRef.current) < 1) return;
+      gridLiftRef.current = nextLift;
+      setGridLift(nextLift);
+    };
+    updateLift();
+    const resizeObserver = new ResizeObserver(updateLift);
+    resizeObserver.observe(grid);
+    window.addEventListener('resize', updateLift);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateLift);
+    };
+  }, []);
+
   const showError = useCallback((message: string) => {
     setError(message);
     setNotice(null);
   }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) setSettingsMounted(false);
+  }, []);
+
+  const openSettings = useCallback(() => {
+    setSettingsMounted(true);
+    window.requestAnimationFrame(() => setSettingsOpen(true));
+  }, []);
+
+  useEffect(() => {
+    if (!settingsMounted) return;
+    const frame = window.requestAnimationFrame(() => setSettingsOpen(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [settingsMounted]);
 
   useEffect(() => {
     if (!notice) return;
@@ -113,6 +262,7 @@ export default function App() {
     loadAppData().then((data) => {
       setProvider(data.preferences.searchProvider);
       setShortcuts(data.shortcuts);
+      setSearchSlot(data.layout.searchSlot);
       setWallpaper(data.wallpaperMetadata);
       cleanupWallpaperFiles(data.wallpaperMetadata?.opfsFileName ?? null).catch(() => undefined);
       setReady(true);
@@ -162,7 +312,7 @@ export default function App() {
       setContextMenu(null);
       setRenameTarget(null);
       setDeleteTarget(null);
-      setSettingsOpen(false);
+      closeSettings();
     };
     const onBlur = () => setContextMenu(null);
     document.addEventListener('pointerdown', onPointerDown);
@@ -173,10 +323,17 @@ export default function App() {
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('blur', onBlur);
     };
-  }, [contextMenu, providerOpen]);
+  }, [closeSettings, contextMenu, providerOpen]);
 
-  const shortcutBySlot = useMemo(() => new Map(shortcuts.map((item) => [item.slot, item])), [shortcuts]);
+  const visibleShortcuts = searchPreview?.shortcuts ?? shortcuts;
+  const visibleSearchSlot = searchPreview?.searchSlot ?? searchSlot;
+  const reservedSearchSlots = useMemo(() => new Set(searchWidgetSlots(visibleSearchSlot)), [visibleSearchSlot]);
   const activeShortcut = activeId ? shortcuts.find((item) => item.id === activeId) : undefined;
+  const searchMoveAnimationRef = useGridMoveAnimation(visibleSearchSlot, false, 170);
+  const setSearchWidgetNode = useCallback((node: HTMLDivElement | null) => {
+    searchWidgetRef.current = node;
+    searchMoveAnimationRef.current = node;
+  }, [searchMoveAnimationRef]);
 
   const search = () => {
     const url = buildSearchUrl(provider, query);
@@ -195,6 +352,123 @@ export default function App() {
     }
   };
 
+  const searchSlotFromPointer = useCallback((clientX: number, clientY: number, session: SearchDragSession) => {
+    const grid = desktopGridRef.current;
+    if (!grid) return session.origin.searchSlot;
+    const rect = grid.getBoundingClientRect();
+    const computed = window.getComputedStyle(grid);
+    const columnGap = Number.parseFloat(computed.columnGap) || 0;
+    const rowGap = Number.parseFloat(computed.rowGap) || 0;
+    const cellWidth = (rect.width - columnGap * (GRID_COLUMNS - 1)) / GRID_COLUMNS;
+    const cellHeight = (rect.height - rowGap * (GRID_ROWS - 1)) / GRID_ROWS;
+    const columnStep = cellWidth + columnGap;
+    const rowStep = cellHeight + rowGap;
+    const column = Math.max(0, Math.min(
+      GRID_COLUMNS - SEARCH_WIDGET_COLUMNS,
+      Math.round((clientX - session.offsetX - rect.left) / columnStep),
+    ));
+    const row = Math.max(0, Math.min(
+      GRID_ROWS - 1,
+      Math.round((clientY - session.offsetY - rect.top) / rowStep),
+    ));
+    return positionToSlot(column, row);
+  }, []);
+
+  const beginSearchHold = (event: ReactPointerEvent<HTMLInputElement>) => {
+    if ((event.pointerType === 'mouse' && event.button !== 0) || query.length > 0 || providerOpen || searchDragging) return;
+    const widget = searchWidgetRef.current;
+    if (!widget) return;
+    const widgetRect = widget.getBoundingClientRect();
+    const input = event.currentTarget;
+    try { input.setPointerCapture(event.pointerId); } catch { return; }
+    setSearchHolding(true);
+    const session: SearchDragSession = {
+      pointerId: event.pointerId,
+      timerId: 0,
+      activated: false,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - widgetRect.left,
+      offsetY: event.clientY - widgetRect.top,
+      origin: { searchSlot, shortcuts },
+      input,
+    };
+    session.timerId = window.setTimeout(() => {
+      if (searchDragSession.current !== session) return;
+      session.activated = true;
+      searchPreviewRef.current = session.origin;
+      setSearchPreview(session.origin);
+      setSearchHolding(false);
+      setSearchDragging(true);
+      input.blur();
+    }, SEARCH_DRAG_HOLD_MS);
+    searchDragSession.current = session;
+  };
+
+  const moveSearchPointer = (event: ReactPointerEvent<HTMLInputElement>) => {
+    const session = searchDragSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    if (!session.activated) {
+      const distance = Math.hypot(event.clientX - session.startX, event.clientY - session.startY);
+      if (distance <= SEARCH_DRAG_TOLERANCE_PX) return;
+      window.clearTimeout(session.timerId);
+      searchDragSession.current = null;
+      setSearchHolding(false);
+      if (session.input.hasPointerCapture(session.pointerId)) session.input.releasePointerCapture(session.pointerId);
+      return;
+    }
+    event.preventDefault();
+    const nextSearchSlot = searchSlotFromPointer(event.clientX, event.clientY, session);
+    if (searchPreviewRef.current?.searchSlot === nextSearchSlot) return;
+    const nextLayout = {
+      searchSlot: nextSearchSlot,
+      shortcuts: reflowShortcutsForSearch(session.origin.shortcuts, nextSearchSlot),
+    };
+    searchPreviewRef.current = nextLayout;
+    setSearchPreview(nextLayout);
+  };
+
+  const endSearchPointer = (event: ReactPointerEvent<HTMLInputElement>) => {
+    const session = searchDragSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    window.clearTimeout(session.timerId);
+    searchDragSession.current = null;
+    setSearchHolding(false);
+    if (session.input.hasPointerCapture(session.pointerId)) session.input.releasePointerCapture(session.pointerId);
+    if (!session.activated) return;
+    event.preventDefault();
+    const nextLayout = searchPreviewRef.current ?? session.origin;
+    searchPreviewRef.current = null;
+    setSearchPreview(null);
+    setSearchDragging(false);
+    setSearchSlot(nextLayout.searchSlot);
+    setShortcuts(nextLayout.shortcuts);
+    suppressSearchClick.current = true;
+    window.setTimeout(() => { suppressSearchClick.current = false; }, 120);
+    if (nextLayout.searchSlot === session.origin.searchSlot && nextLayout.shortcuts === session.origin.shortcuts) return;
+    void saveLayout(nextLayout.shortcuts, nextLayout.searchSlot).catch(() => {
+      setSearchSlot(session.origin.searchSlot);
+      setShortcuts(session.origin.shortcuts);
+      showError('桌面布局保存失败，已恢复原位置。');
+    });
+  };
+
+  const cancelSearchPointer = (event: ReactPointerEvent<HTMLInputElement>) => {
+    const session = searchDragSession.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    window.clearTimeout(session.timerId);
+    searchDragSession.current = null;
+    searchPreviewRef.current = null;
+    setSearchPreview(null);
+    setSearchHolding(false);
+    setSearchDragging(false);
+  };
+
+  useEffect(() => () => {
+    const session = searchDragSession.current;
+    if (session) window.clearTimeout(session.timerId);
+  }, []);
+
   const openShortcut = (shortcut: Shortcut) => {
     if (justDragged.current) return;
     window.location.assign(shortcut.url);
@@ -202,6 +476,7 @@ export default function App() {
 
   const onDragStart = (event: DragStartEvent) => {
     justDragged.current = true;
+    setSettlingShortcutId(null);
     setActiveId(String(event.active.id));
     setContextMenu(null);
   };
@@ -212,9 +487,11 @@ export default function App() {
     const slot = event.over?.data.current?.slot;
     if (typeof slot !== 'number') return;
     const previous = shortcuts;
-    const next = moveOrSwapShortcut(shortcuts, String(event.active.id), slot);
+    const next = moveOrSwapShortcut(shortcuts, String(event.active.id), slot, new Set(searchWidgetSlots(searchSlot)));
     if (next === previous) return;
+    setSettlingShortcutId(String(event.active.id));
     setShortcuts(next);
+    window.requestAnimationFrame(() => setSettlingShortcutId(null));
     try {
       await saveShortcuts(next);
     } catch {
@@ -263,7 +540,7 @@ export default function App() {
 
   const addShortcut = async (values: { name: string; url: string; mode: IconMode; iconFile: File | null }) => {
     if (shortcuts.length >= MAX_SHORTCUTS) throw new ShortcutValidationError('最多只能添加 24 个快捷方式。');
-    const slot = firstEmptySlot(shortcuts);
+    const slot = firstEmptySlot(shortcuts, new Set(searchWidgetSlots(searchSlot)));
     if (slot === null) throw new ShortcutValidationError('最多只能添加 24 个快捷方式。');
     const url = normalizeShortcutUrl(values.url);
     let customIconId: string | undefined;
@@ -325,64 +602,107 @@ export default function App() {
       <div className="readabilityLayer" />
 
       <section className="content" aria-label="新标签页">
-        <div className="searchWrap">
-          <div className="providerWrap" ref={providerMenuRef}>
-            <button className="providerButton" aria-label="选择搜索提供商" aria-expanded={providerOpen} onClick={() => setProviderOpen((open) => !open)}>
-              <svg
-                className={`providerChevron${providerOpen ? ' open' : ''}`}
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path d="M2.8 5.8 8 9.8l5.2-4" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            {providerOpen && (
-              <div className="providerMenu" role="menu">
-                {SEARCH_PROVIDERS.map((item) => (
-                  <button key={item.id} role="menuitemradio" aria-checked={provider === item.id} onClick={() => void selectProvider(item.id)}>
-                    <span>{item.name}</span><span className="check">{provider === item.id && <CheckIcon />}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter') search(); }}
-            aria-label="搜索内容"
-            placeholder={`使用 ${SEARCH_PROVIDERS.find((item) => item.id === provider)?.name} 搜索`}
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <button className="searchButton" aria-label="搜索" onClick={search}><SearchIcon /></button>
-        </div>
-
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={onDragStart} onDragCancel={() => { setActiveId(null); justDragged.current = false; }} onDragEnd={(event) => void onDragEnd(event)}>
-          <div className="shortcutGrid" aria-label="快捷方式">
+          <div
+            ref={desktopGridRef}
+            className={`desktopGrid${activeId || searchDragging ? ' layoutDragging' : ''}`}
+            style={{ transform: `translateY(-${gridLift}px)` }}
+            aria-label="桌面布局"
+          >
             {GRID_SLOTS.map((slot) => (
-              <GridSlot key={slot} slot={slot} shortcut={shortcutBySlot.get(slot)} onContextMenu={openContextMenu} onOpen={openShortcut} />
+              <GridSlot key={slot} slot={slot} reserved={reservedSearchSlots.has(slot)} />
             ))}
+            {visibleShortcuts.map((shortcut) => (
+              <PositionedShortcut
+                key={shortcut.id}
+                shortcut={shortcut}
+                skipLayoutAnimation={shortcut.id === settlingShortcutId}
+                onContextMenu={openContextMenu}
+                onOpen={openShortcut}
+              />
+            ))}
+            <div
+              ref={setSearchWidgetNode}
+              className={`searchWidget${searchHolding ? ' holding' : ''}${searchDragging ? ' dragging' : ''}${query.length === 0 && !providerOpen ? ' canDrag' : ''}${slotToPosition(visibleSearchSlot).row >= 4 ? ' opensUp' : ''}`}
+              style={gridPlacement(visibleSearchSlot, SEARCH_WIDGET_COLUMNS)}
+            >
+              <div className="searchWrap">
+                <div className="providerWrap" ref={providerMenuRef}>
+                  <button className="providerButton" aria-label="选择搜索提供商" aria-expanded={providerOpen} onClick={() => setProviderOpen((open) => !open)}>
+                    <svg
+                      className={`providerChevron${providerOpen ? ' open' : ''}`}
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <path d="M2.8 5.8 8 9.8l5.2-4" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                  {providerOpen && (
+                    <div className="providerMenu" role="menu">
+                      {SEARCH_PROVIDERS.map((item) => (
+                        <button key={item.id} role="menuitemradio" aria-checked={provider === item.id} onClick={() => void selectProvider(item.id)}>
+                          <span>{item.name}</span><span className="check">{provider === item.id && <CheckIcon />}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter') search(); }}
+                  onPointerDown={beginSearchHold}
+                  onPointerMove={moveSearchPointer}
+                  onPointerUp={endSearchPointer}
+                  onPointerCancel={cancelSearchPointer}
+                  onClick={(event) => {
+                    if (!suppressSearchClick.current) return;
+                    event.preventDefault();
+                    event.currentTarget.blur();
+                  }}
+                  onContextMenu={(event) => { if (searchHolding || searchDragging) event.preventDefault(); }}
+                  aria-label="搜索内容"
+                  aria-description="输入框为空且搜索提供商菜单关闭时，长按可拖动搜索框"
+                  placeholder={`使用 ${SEARCH_PROVIDERS.find((item) => item.id === provider)?.name} 搜索`}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <button className="searchButton" aria-label="搜索" onClick={search}><SearchIcon /></button>
+              </div>
+            </div>
           </div>
-          <DragOverlay>{activeShortcut ? <div className="shortcut dragOverlay"><span className="shortcutIcon"><ShortcutIcon shortcut={activeShortcut} /></span><span className="shortcutName">{activeShortcut.name}</span></div> : null}</DragOverlay>
+          <DragOverlay dropAnimation={shortcutDropAnimation}>{activeShortcut ? <div className="shortcut dragOverlay"><span className="shortcutIcon"><ShortcutIcon shortcut={activeShortcut} /></span><span className="shortcutName">{activeShortcut.name}</span></div> : null}</DragOverlay>
         </DndContext>
       </section>
 
-      <button className="settingsButton" aria-label="打开设置" onClick={() => setSettingsOpen(true)}><GearIcon /></button>
+      <button
+        className={`settingsButton${settingsOpen ? ' open' : ''}`}
+        aria-label={settingsOpen ? '关闭设置' : '打开设置'}
+        aria-expanded={settingsOpen}
+        aria-controls="settings-panel"
+        onClick={settingsOpen ? closeSettings : openSettings}
+      ><GearIcon /></button>
       {!ready && <div className="loading" role="status">正在加载…</div>}
       {(error || notice) && <div className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>{error ?? notice}<button aria-label="关闭提示" onClick={() => { setError(null); setNotice(null); }}>×</button></div>}
 
-      {settingsOpen && (
-        <div className="drawerBackdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+      {settingsMounted && (
+        <div
+          className={`drawerBackdrop${settingsOpen ? ' open' : ''}`}
+          aria-hidden={!settingsOpen}
+          onMouseDown={(event) => { if (event.target === event.currentTarget) closeSettings(); }}
+        >
           <SettingsPanel
             wallpaper={wallpaper}
             shortcutCount={shortcuts.length}
-            onClose={() => setSettingsOpen(false)}
+            onClose={closeSettings}
             onAdd={addShortcut}
             onWallpaper={changeWallpaper}
             onDeleteWallpaper={removeWallpaper}
             onError={showError}
+            onTransitionEnd={(event) => {
+              if (!settingsOpen && event.target === event.currentTarget && event.propertyName === 'transform') setSettingsMounted(false);
+            }}
           />
         </div>
       )}
@@ -399,7 +719,7 @@ export default function App() {
   );
 }
 
-function SettingsPanel({ wallpaper, shortcutCount, onClose, onAdd, onWallpaper, onDeleteWallpaper, onError }: {
+function SettingsPanel({ wallpaper, shortcutCount, onClose, onAdd, onWallpaper, onDeleteWallpaper, onError, onTransitionEnd }: {
   wallpaper: WallpaperMetadata | null;
   shortcutCount: number;
   onClose: () => void;
@@ -407,6 +727,7 @@ function SettingsPanel({ wallpaper, shortcutCount, onClose, onAdd, onWallpaper, 
   onWallpaper: (file: File, type: WallpaperType) => Promise<void>;
   onDeleteWallpaper: () => Promise<void>;
   onError: (message: string) => void;
+  onTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
 }) {
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -443,7 +764,7 @@ function SettingsPanel({ wallpaper, shortcutCount, onClose, onAdd, onWallpaper, 
   };
 
   return (
-    <aside className="settingsPanel" aria-label="设置">
+    <aside id="settings-panel" className="settingsPanel" role="dialog" aria-modal="true" aria-label="设置" onTransitionEnd={onTransitionEnd}>
       <header><h2>设置</h2><button className="closeButton" aria-label="关闭设置" onClick={onClose}>×</button></header>
       <section>
         <h3>壁纸</h3>

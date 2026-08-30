@@ -1,11 +1,13 @@
-import { SEARCH_PROVIDERS } from '../constants';
+import { DEFAULT_SEARCH_SLOT, MAX_SHORTCUTS, SEARCH_PROVIDERS } from '../constants';
+import { legacySlotToGridSlot, normalizeSearchSlot, reflowShortcutsForSearch } from '../lib/layout';
 import { isValidShortcut } from '../lib/shortcuts';
 import type { AppData, SearchProviderId, Shortcut, WallpaperMetadata } from '../types';
 
 const STORAGE_KEY = 'appData';
 const defaultData: AppData = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   preferences: { searchProvider: 'bing' },
+  layout: { searchSlot: DEFAULT_SEARCH_SLOT },
   shortcuts: [],
   wallpaperMetadata: null,
 };
@@ -16,10 +18,21 @@ function isProvider(value: unknown): value is SearchProviderId {
 
 export function migrateAppData(raw: unknown): AppData {
   if (!raw || typeof raw !== 'object') return structuredClone(defaultData);
-  const candidate = raw as Partial<AppData>;
-  if (candidate.schemaVersion !== 1) return structuredClone(defaultData);
+  const candidate = raw as Record<string, unknown>;
+  if (candidate.schemaVersion !== 1 && candidate.schemaVersion !== 2) return structuredClone(defaultData);
+  const isLegacy = candidate.schemaVersion === 1;
+  const rawLayout = candidate.layout && typeof candidate.layout === 'object'
+    ? candidate.layout as Record<string, unknown>
+    : null;
+  const rawPreferences = candidate.preferences && typeof candidate.preferences === 'object'
+    ? candidate.preferences as Record<string, unknown>
+    : null;
+  const searchSlot = isLegacy ? DEFAULT_SEARCH_SLOT : normalizeSearchSlot(rawLayout?.searchSlot);
   const shortcuts = Array.isArray(candidate.shortcuts)
-    ? candidate.shortcuts.filter(isValidShortcut).slice(0, 24)
+    ? candidate.shortcuts
+      .filter((shortcut) => isValidShortcut(shortcut, isLegacy ? 24 : undefined))
+      .slice(0, MAX_SHORTCUTS)
+      .map((shortcut) => isLegacy ? { ...shortcut, slot: legacySlotToGridSlot(shortcut.slot) } : shortcut)
     : [];
   const seenSlots = new Set<number>();
   const uniqueShortcuts = shortcuts.filter((shortcut) => {
@@ -28,14 +41,15 @@ export function migrateAppData(raw: unknown): AppData {
     return true;
   });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     preferences: {
-      searchProvider: isProvider(candidate.preferences?.searchProvider)
-        ? candidate.preferences.searchProvider
+      searchProvider: isProvider(rawPreferences?.searchProvider)
+        ? rawPreferences.searchProvider
         : 'bing',
     },
-    shortcuts: uniqueShortcuts,
-    wallpaperMetadata: candidate.wallpaperMetadata ?? null,
+    layout: { searchSlot },
+    shortcuts: reflowShortcutsForSearch(uniqueShortcuts, searchSlot),
+    wallpaperMetadata: candidate.wallpaperMetadata as WallpaperMetadata | null ?? null,
   };
 }
 
@@ -61,6 +75,10 @@ export async function saveSearchProvider(searchProvider: SearchProviderId): Prom
 
 export async function saveShortcuts(shortcuts: Shortcut[]): Promise<void> {
   await updateData((data) => ({ ...data, shortcuts }));
+}
+
+export async function saveLayout(shortcuts: Shortcut[], searchSlot: number): Promise<void> {
+  await updateData((data) => ({ ...data, shortcuts, layout: { searchSlot } }));
 }
 
 export async function saveWallpaperMetadata(wallpaperMetadata: WallpaperMetadata | null): Promise<void> {

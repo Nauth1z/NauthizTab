@@ -50,26 +50,33 @@ label.actionButton:has(input:focus-visible) {
 .content {
   position: relative;
   z-index: 2;
-  display: flex;
+  display: grid;
   height: 100%;
-  flex-direction: column;
-  align-items: center;
-  padding-top: clamp(64px, 13vh, 132px);
+  padding: clamp(32px, 6vh, 64px) 36px;
+  place-items: center;
 }
 
 /* Chrome-style search capsule */
+.searchWidget {
+  z-index: 3;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  align-self: stretch;
+  padding: 0 2px;
+}
 .searchWrap {
   position: relative;
   display: grid;
   grid-template-columns: 52px 1fr 54px;
-  width: min(640px, 90vw);
-  height: 52px;
+  width: 100%;
+  height: clamp(44px, 70%, 52px);
   border: 1px solid #dfe1e5;
   border-radius: 27px;
   background: #fff;
   color: #202124;
   box-shadow: 0 1px 6px rgba(32, 33, 36, .12);
-  transition: border-color .2s ease, box-shadow .2s ease;
+  transition: border-color .2s ease, box-shadow .2s ease, opacity .16s ease, transform .18s ease;
 }
 .searchWrap:hover { box-shadow: 0 1px 7px rgba(32, 33, 36, .16); }
 .searchWrap:focus-within {
@@ -84,6 +91,19 @@ label.actionButton:has(input:focus-visible) {
   color: #202124;
   font-size: 17px;
 }
+.searchWidget.canDrag .searchWrap input { touch-action: none; }
+.searchWidget.holding .searchWrap {
+  box-shadow: 0 3px 12px rgba(32, 33, 36, .2);
+  transform: scale(.995);
+}
+.searchWidget.dragging { z-index: 8; }
+.searchWidget.dragging .searchWrap {
+  opacity: .9;
+  box-shadow: 0 10px 28px rgba(32, 33, 36, .24);
+  cursor: grabbing;
+  transform: scale(1.015);
+}
+.searchWidget.dragging .searchWrap input { cursor: grabbing; }
 .searchWrap input::placeholder { color: #70757a; }
 .providerWrap { position: relative; width: 100%; height: 100%; }
 .providerButton,
@@ -129,6 +149,12 @@ label.actionButton:has(input:focus-visible) {
   transform-origin: top left;
   animation: menuReveal .18s ease-out;
 }
+.searchWidget.opensUp .providerMenu {
+  top: auto;
+  bottom: 60px;
+  transform-origin: bottom left;
+  animation-name: menuRevealUp;
+}
 .providerMenu button {
   display: flex;
   width: 100%;
@@ -153,27 +179,66 @@ label.actionButton:has(input:focus-visible) {
   from { opacity: 0; transform: translateY(-5px) scale(.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+@keyframes menuRevealUp {
+  from { opacity: 0; transform: translateY(5px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 
-/* Single-page 6 × 4 shortcut grid */
-.shortcutGrid {
+/* Responsive 10 × 7 desktop grid; shortcuts remain capped at 24. */
+.desktopGrid {
+  position: relative;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  grid-template-rows: repeat(4, 1fr);
-  width: min(680px, 86vw);
-  height: min(400px, calc(100vh - clamp(140px, 22vh, 210px)));
-  min-height: 280px;
-  margin-top: clamp(22px, 4vh, 40px);
-  gap: clamp(2px, .7vh, 8px) clamp(5px, 1vw, 14px);
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-rows: repeat(7, minmax(0, 1fr));
+  width: min(1120px, calc(100vw - 72px));
+  height: min(760px, calc(100vh - 72px));
+  gap: clamp(3px, .65vh, 8px) clamp(4px, .7vw, 10px);
 }
 .gridSlot {
+  z-index: 0;
+  position: relative;
   display: grid;
   min-width: 0;
   min-height: 0;
   place-items: center;
   border-radius: 14px;
-  transition: background .16s ease;
+  background: transparent;
+  --grid-line-color: rgb(143, 174, 197);
+  --grid-line-opacity: 0;
 }
-.gridSlot.slotOver { background: var(--salt-hover); }
+.gridSlot::after {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--grid-line-color);
+  border-radius: inherit;
+  content: "";
+  opacity: var(--grid-line-opacity);
+  pointer-events: none;
+  transition: opacity .52s cubic-bezier(.16, 1, .3, 1);
+}
+.desktopGrid.layoutDragging .gridSlot {
+  --grid-line-opacity: .22;
+}
+.desktopGrid.layoutDragging .gridSlot::after {
+  transition-duration: .12s;
+}
+.desktopGrid.layoutDragging .gridSlot.reserved {
+  --grid-line-opacity: .13;
+}
+.gridSlot.slotOver:not(.reserved) {
+  --grid-line-opacity: .62;
+}
+.gridSlot.slotOver.reserved {
+  --grid-line-color: rgb(181, 72, 72);
+  --grid-line-opacity: .52;
+}
+.shortcutPosition {
+  z-index: 2;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+}
 .shortcut {
   display: flex;
   width: 100%;
@@ -190,14 +255,13 @@ label.actionButton:has(input:focus-visible) {
   text-shadow: 0 1px 4px rgba(0,0,0,.82);
   touch-action: none;
   user-select: none;
-  transition: background .18s ease, transform .18s ease, opacity .13s ease, box-shadow .18s ease;
+  transition: background .18s ease, box-shadow .18s ease;
 }
 .shortcut:hover {
   background: var(--salt-hover);
   box-shadow: 0 5px 14px var(--salt-shadow);
-  transform: translateY(-2px);
 }
-.shortcut.dragging { opacity: .22; }
+.shortcut.dragging { opacity: 0; }
 .shortcutIcon {
   display: grid;
   width: 48px;
@@ -240,12 +304,20 @@ label.actionButton:has(input:focus-visible) {
 .dragOverlay {
   width: 102px;
   height: 90px;
-  border: 1px solid var(--salt-border);
+  pointer-events: none;
+  border: 1px solid transparent;
   border-radius: 14px;
-  background: rgba(240, 244, 248, .88);
-  box-shadow: 0 8px 24px rgba(45, 62, 80, .18);
-  transform: scale(1.03);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  will-change: transform;
 }
+.dragOverlay:hover {
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+.dragOverlay .shortcutIcon { box-shadow: 0 2px 7px var(--salt-shadow); }
 .noWallpaper .shortcut { color: var(--salt-primary-dark); text-shadow: none; }
 
 /* Settings trigger and notifications */
@@ -265,10 +337,20 @@ label.actionButton:has(input:focus-visible) {
   opacity: .72;
   box-shadow: 0 3px 12px var(--salt-shadow);
   backdrop-filter: blur(12px);
-  transition: opacity .18s ease, background .18s ease, transform .18s ease;
+  transition: opacity .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
 }
-.settingsButton:hover { opacity: 1; background: var(--salt-bg-subtle); transform: rotate(18deg); }
-.settingsButton svg { width: 21px; height: 21px; fill: currentColor; }
+.settingsButton:hover { opacity: 1; background: var(--salt-bg-subtle); box-shadow: 0 5px 16px rgba(45, 62, 80, .13); transform: scale(1.05); }
+.settingsButton:active { transform: scale(.92); }
+.settingsButton.open { opacity: 1; background: var(--salt-bg-subtle); transform: scale(.96); }
+.settingsButton svg {
+  width: 21px;
+  height: 21px;
+  fill: currentColor;
+  transition: transform .24s cubic-bezier(.22, 1, .36, 1);
+}
+.settingsButton:hover svg { transform: rotate(18deg); }
+.settingsButton.open svg,
+.settingsButton.open:hover svg { transform: rotate(90deg); }
 .loading {
   position: absolute;
   inset: 0;
@@ -309,6 +391,17 @@ label.actionButton:has(input:focus-visible) {
   position: absolute;
   inset: 0;
   z-index: 40;
+  background: rgba(45, 62, 80, 0);
+}
+.drawerBackdrop {
+  pointer-events: none;
+  opacity: 0;
+  backdrop-filter: blur(0);
+  transition: opacity .18s ease, background .18s ease, backdrop-filter .18s ease;
+}
+.drawerBackdrop.open {
+  pointer-events: auto;
+  opacity: 1;
   background: rgba(45, 62, 80, .16);
   backdrop-filter: blur(2px);
 }
@@ -326,7 +419,11 @@ label.actionButton:has(input:focus-visible) {
   box-shadow: -8px 0 24px var(--salt-shadow);
   color: var(--salt-primary-dark);
   backdrop-filter: blur(12px);
+  opacity: .96;
+  transform: translateX(calc(100% + 24px));
+  transition: transform .24s cubic-bezier(.22, 1, .36, 1), opacity .18s ease;
 }
+.drawerBackdrop.open .settingsPanel { opacity: 1; transform: translateX(0); }
 .settingsPanel header,
 .sectionTitle { display: flex; align-items: center; justify-content: space-between; }
 .settingsPanel h2 { margin: 0; font-size: 24px; }
@@ -476,12 +573,18 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .dialogActions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
 
 @media (max-height: 650px) {
-  .content { padding-top: 55px; }
-  .shortcutGrid { height: calc(100vh - 124px); margin-top: 14px; gap: 0 8px; }
-  .shortcutIcon { width: 44px; height: 44px; border-radius: 13px; }
+  .content { padding-top: 28px; padding-bottom: 28px; }
+  .desktopGrid { height: calc(100vh - 56px); row-gap: 2px; }
+  .shortcutIcon { width: 38px; height: 38px; border-radius: 12px; }
   .shortcut { gap: 4px; }
+  .shortcutName { font-size: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

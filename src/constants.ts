@@ -1,7 +1,15 @@
 import type { SearchProviderId } from './types';
 
 export const MAX_SHORTCUTS = 24;
-export const GRID_SLOTS = Array.from({ length: MAX_SHORTCUTS }, (_, index) => index);
+export const GRID_COLUMNS = 10;
+export const GRID_ROWS = 7;
+export const GRID_SLOT_COUNT = GRID_COLUMNS * GRID_ROWS;
+export const GRID_SLOTS = Array.from({ length: GRID_SLOT_COUNT }, (_, index) => index);
+export const SEARCH_WIDGET_COLUMNS = 6;
+export const SEARCH_WIDGET_ROWS = 1;
+export const DEFAULT_SEARCH_SLOT = 2;
+export const SEARCH_DRAG_HOLD_MS = 360;
+export const SEARCH_DRAG_TOLERANCE_PX = 6;
 export const IMAGE_WALLPAPER_MAX_BYTES = 30 * 1024 * 1024;
 export const VIDEO_WALLPAPER_MAX_BYTES = 200 * 1024 * 1024;
 

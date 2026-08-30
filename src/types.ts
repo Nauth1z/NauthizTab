@@ -29,4 +29,16 @@ export interface AppDataV1 {
   wallpaperMetadata: WallpaperMetadata | null;
 }
 
-export type AppData = AppDataV1;
+export interface AppDataV2 {
+  schemaVersion: 2;
+  preferences: {
+    searchProvider: SearchProviderId;
+  };
+  layout: {
+    searchSlot: number;
+  };
+  shortcuts: Shortcut[];
+  wallpaperMetadata: WallpaperMetadata | null;
+}
+
+export type AppData = AppDataV2;

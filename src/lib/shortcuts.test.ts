@@ -24,8 +24,8 @@ describe('快捷方式 URL', () => {
 });
 
 describe('快捷方式槽位', () => {
-  it('返回第一个空槽位', () => {
-    expect(firstEmptySlot([shortcut('a', 0), shortcut('b', 2)])).toBe(1);
+  it('返回第一个没有被搜索框占用的空槽位', () => {
+    expect(firstEmptySlot([shortcut('a', 6)], new Set([0, 1, 2, 3, 4, 5]))).toBe(7);
   });
 
   it('拖到空槽位时移动且不重排其他图标', () => {
@@ -38,7 +38,17 @@ describe('快捷方式槽位', () => {
     expect(result.map(({ id, slot }) => ({ id, slot }))).toEqual([{ id: 'a', slot: 2 }, { id: 'b', slot: 0 }]);
   });
 
-  it('24 个槽位占满后返回 null', () => {
-    expect(firstEmptySlot(Array.from({ length: 24 }, (_, index) => shortcut(String(index), index)))).toBeNull();
+  it('允许移动到扩展网格的末尾', () => {
+    const result = moveOrSwapShortcut([shortcut('a', 0)], 'a', 69);
+    expect(result[0].slot).toBe(69);
+  });
+
+  it('拒绝移动到搜索框占用的槽位', () => {
+    const shortcuts = [shortcut('a', 20)];
+    expect(moveOrSwapShortcut(shortcuts, 'a', 2, new Set([2, 3, 4, 5, 6, 7]))).toBe(shortcuts);
+  });
+
+  it('70 个槽位占满后返回 null', () => {
+    expect(firstEmptySlot(Array.from({ length: 70 }, (_, index) => shortcut(String(index), index)))).toBeNull();
   });
 });

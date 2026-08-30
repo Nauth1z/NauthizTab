@@ -18,7 +18,8 @@ Nauthiz Tab 是一个面向 Microsoft Edge / Chromium 的 Manifest V3 新标签�
 
 - 通过 `chrome_url_overrides.newtab` 接管 Edge 新标签页。
 - 五个固定搜索提供商：Bing、Google、百度、DuckDuckGo、搜狗；默认 Bing，选择会持久化。
-- 6 列 × 4 行单页逻辑网格，支持空槽、拖到空槽和两个快捷方式交换位置。
+- 10 列 × 7 行单页逻辑网格，最多仍为 24 个快捷方式；支持空槽、拖到空槽和两个快捷方式交换位置。
+- 搜索框作为占用 6 × 1 格的小部件参与桌面布局；输入框为空且提供商菜单关闭时，可长按输入框拖动并挤开冲突图标。
 - 最多 24 个快捷方式；支持自动 favicon 和 128×128 WebP 自定义图标。
 - 右键菜单只提供修改名称和删除，删除不会重排其他槽位。
 - 支持 JPG/JPEG、PNG、WebP 静态壁纸（最大 30 MB）和 MP4、WebM 视频壁纸（最大 200 MB）。
@@ -52,7 +53,7 @@ Nauthiz Tab 是一个面向 Microsoft Edge / Chromium 的 Manifest V3 新标签�
 └─ vite.config.ts
 ```
 
-存储职责彼此分离：`chrome.storage.local` 只保存 JSON 元数据，IndexedDB 只保存自定义图标 Blob，OPFS 只保存当前壁纸文件。UI 不直接拼装存储键。当前数据结构为 `schemaVersion: 1`，未来迁移统一从 `migrateAppData` 进入。
+存储职责彼此分离：`chrome.storage.local` 只保存 JSON 元数据，IndexedDB 只保存自定义图标 Blob，OPFS 只保存当前壁纸文件。UI 不直接拼装存储键。当前数据结构为 `schemaVersion: 2`，会从版本 1 自动迁移快捷方式槽位并初始化搜索框位置；未来迁移统一从 `migrateAppData` 进入。
 
 ## 开发与验证
 
@@ -81,6 +82,7 @@ npm run build
 ## 使用方法
 
 - 在搜索框输入关键词后按 Enter，或点击右侧放大镜；点击左侧下箭头可切换搜索提供商。
+- 搜索框为空且搜索提供商菜单关闭时，长按输入区域约 0.36 秒即可拖动；落到图标区域时，冲突图标会自动让位。
 - 点击右上角齿轮打开设置。可导入或删除当前壁纸，也可添加快捷方式。
 - 添加快捷方式时，裸域名会自动补全为 `https://`；只允许 HTTP 和 HTTPS。
 - 拖动快捷方式到空槽可移动，拖到另一个图标上可交换位置。
