@@ -31,6 +31,7 @@ export interface AppDataV1 {
 
 export interface AppDataV2 {
   schemaVersion: 2;
+  revision?: number;
   preferences: {
     searchProvider: SearchProviderId;
   };

@@ -4,13 +4,14 @@ import { getCustomIcon } from '../storage/iconStore';
 
 interface Props {
   shortcut: Shortcut;
+  refreshKey?: number;
 }
 
-export function ShortcutIcon({ shortcut }: Props) {
+export function ShortcutIcon({ shortcut, refreshKey = 0 }: Props) {
   const [customUrl, setCustomUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const faviconUrl = useMemo(() => {
-    if (!chrome.runtime?.id) return '';
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id) return '';
     return chrome.runtime.getURL(`_favicon/?pageUrl=${encodeURIComponent(shortcut.url)}&size=64`);
   }, [shortcut.url]);
 
@@ -33,9 +34,13 @@ export function ShortcutIcon({ shortcut }: Props) {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [shortcut.customIconId, shortcut.iconMode]);
+  }, [shortcut.customIconId, shortcut.iconMode, refreshKey]);
+
+  useEffect(() => {
+    if (shortcut.iconMode === 'favicon') setFailed(false);
+  }, [faviconUrl, shortcut.iconMode, refreshKey]);
 
   const src = shortcut.iconMode === 'custom' ? customUrl : faviconUrl;
-  if (!src || failed) return <span className="letterIcon" aria-hidden="true">{shortcut.name.trim().charAt(0).toUpperCase() || '?'}</span>;
-  return <img className="shortcutImage" src={src} alt="" draggable={false} onError={() => setFailed(true)} />;
+  if (!src || failed) return <span className="letterIcon" aria-hidden="true" title="图标不可用，可右键刷新图标或修改图标">{shortcut.name.trim().charAt(0).toUpperCase() || '?'}</span>;
+  return <img key={refreshKey} className="shortcutImage" src={src} alt="" draggable={false} onError={() => setFailed(true)} />;
 }

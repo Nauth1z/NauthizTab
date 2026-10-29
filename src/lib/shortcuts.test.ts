@@ -21,6 +21,10 @@ describe('快捷方式 URL', () => {
   it('拒绝无效 URL', () => {
     expect(() => normalizeShortcutUrl('https://')).toThrow('URL 无效');
   });
+
+  it.each(['example.com:8080/path', 'localhost:3000', '192.168.1.1:8080', '[::1]:3000'])('支持带端口的裸地址 %s', (input) => {
+    expect(normalizeShortcutUrl(input)).toBe(new URL(`https://${input}`).href);
+  });
 });
 
 describe('快捷方式槽位', () => {

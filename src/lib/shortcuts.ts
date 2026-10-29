@@ -6,7 +6,9 @@ export class ShortcutValidationError extends Error {}
 export function normalizeShortcutUrl(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) throw new ShortcutValidationError('请输入快捷方式 URL。');
-  const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const hasPort = /^(?:[\w.-]+|\[[\da-fA-F:]+\]):\d+(?:[/?#]|$)/.test(trimmed);
+  const hasScheme = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed) && !hasPort;
+  const candidate = hasScheme ? trimmed : `https://${trimmed}`;
   let parsed: URL;
   try {
     parsed = new URL(candidate);

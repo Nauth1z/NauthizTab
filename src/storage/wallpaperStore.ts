@@ -4,8 +4,9 @@ import {
   VIDEO_WALLPAPER_MAX_BYTES,
   VIDEO_WALLPAPER_MIMES,
 } from '../constants';
-import type { WallpaperMetadata, WallpaperType } from '../types';
-import { saveWallpaperMetadata } from './appStorage';
+import type { AppData, WallpaperMetadata, WallpaperType } from '../types';
+import { loadAppData, saveWallpaperMetadata } from './appStorage';
+import { withLock } from './locks';
 
 export class WallpaperError extends Error {}
 
@@ -80,41 +81,30 @@ function writeError(error: unknown): WallpaperError {
 export async function importWallpaper(
   file: File,
   type: WallpaperType,
-  previous: WallpaperMetadata | null,
-): Promise<WallpaperMetadata> {
+): Promise<AppData> {
   validateWallpaper(file, type);
   await validateWallpaperContent(file, type);
-  const directory = await root();
-  const opfsFileName = `wallpaper-${crypto.randomUUID()}.${extensionForMime(file.type)}`;
-  try {
-    const handle = await directory.getFileHandle(opfsFileName, { create: true });
-    const writable = await handle.createWritable();
-    await file.stream().pipeTo(writable);
-    const stored = await handle.getFile();
-    if (stored.size !== file.size) throw new Error('size mismatch');
-    const metadata: WallpaperMetadata = {
-      type,
-      fileName: file.name,
-      mimeType: file.type,
-      opfsFileName,
-      size: file.size,
-    };
+  return withLock('wallpaper', async () => {
+    // Check compatibility before creating or deleting any files.
+    await loadAppData();
+    const directory = await root();
+    const opfsFileName = `wallpaper-${crypto.randomUUID()}.${extensionForMime(file.type)}`;
+    let data: AppData;
     try {
-      await saveWallpaperMetadata(metadata);
+      const handle = await directory.getFileHandle(opfsFileName, { create: true });
+      const writable = await handle.createWritable();
+      await file.stream().pipeTo(writable);
+      const stored = await handle.getFile();
+      if (stored.size !== file.size) throw new Error('size mismatch');
+      data = await saveWallpaperMetadata({ type, fileName: file.name, mimeType: file.type, opfsFileName, size: file.size });
     } catch (error) {
       await directory.removeEntry(opfsFileName).catch(() => undefined);
-      throw error;
+      throw writeError(error);
     }
-    if (previous?.opfsFileName && previous.opfsFileName !== opfsFileName) {
-      await directory.removeEntry(previous.opfsFileName).catch(() => undefined);
-    }
-    await cleanupWallpaperFiles(opfsFileName);
-    return metadata;
-  } catch (error) {
-    await directory.removeEntry(opfsFileName).catch(() => undefined);
-    if (error instanceof WallpaperError) throw error;
-    throw writeError(error);
-  }
+    // The new file is committed. Cleanup is retried on the next tab load.
+    await cleanupFiles(directory, opfsFileName).catch(() => undefined);
+    return data;
+  });
 }
 
 export async function loadWallpaperFile(metadata: WallpaperMetadata): Promise<File> {
@@ -127,16 +117,22 @@ export async function loadWallpaperFile(metadata: WallpaperMetadata): Promise<Fi
   }
 }
 
-export async function deleteWallpaper(metadata: WallpaperMetadata | null): Promise<void> {
-  await saveWallpaperMetadata(null);
-  if (!metadata) return;
-  const directory = await root();
-  await directory.removeEntry(metadata.opfsFileName).catch(() => undefined);
-  await cleanupWallpaperFiles(null);
+export function deleteWallpaper(): Promise<AppData> {
+  return withLock('wallpaper', async () => {
+    const data = await saveWallpaperMetadata(null);
+    await root().then((directory) => cleanupFiles(directory, null)).catch(() => undefined);
+    return data;
+  });
 }
 
-export async function cleanupWallpaperFiles(keep: string | null): Promise<void> {
-  const directory = await root();
+export function cleanupWallpaperFiles(): Promise<void> {
+  return withLock('wallpaper', async () => {
+    const data = await loadAppData();
+    await cleanupFiles(await root(), data.wallpaperMetadata?.opfsFileName ?? null);
+  });
+}
+
+async function cleanupFiles(directory: FileSystemDirectoryHandle, keep: string | null): Promise<void> {
   const iterableDirectory = directory as FileSystemDirectoryHandle & {
     keys(): AsyncIterableIterator<string>;
   };

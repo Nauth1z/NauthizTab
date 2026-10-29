@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Nauthiz Tab",
   "description": "简洁、私密的本地壁纸新标签页。",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "permissions": ["storage", "favicon", "unlimitedStorage"],
   "chrome_url_overrides": {
     "newtab": "index.html"

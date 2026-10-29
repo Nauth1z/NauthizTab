@@ -501,6 +501,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   color: #334b60;
   box-shadow: 0 1px 2px var(--salt-shadow);
 }
+.dialog input[type="radio"] { width: auto; height: auto; box-shadow: none; }
+.dialog .radio { flex-direction: row; align-items: center; margin: 10px 0; }
+.dialog input[type="file"] { height: auto; }
 .settingsPanel input::placeholder { color: #8497a7; }
 .settingsPanel input[type="file"] { color: var(--salt-primary-dark); }
 .settingsPanel input[type="file"]::file-selector-button {

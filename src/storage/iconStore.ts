@@ -17,17 +17,27 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-function requestDone(request: IDBRequest): Promise<void> {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+async function runStoreTransaction<T>(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  const db = await openDb();
+  db.onversionchange = () => db.close();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, mode);
+      transaction.onabort = () => reject(transaction.error ?? new Error('图标事务已中止。'));
+      transaction.onerror = () => reject(transaction.error ?? new Error('图标事务失败。'));
+      const request = operation(transaction.objectStore(STORE_NAME));
+      transaction.oncomplete = () => resolve(request.result);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 export async function processCustomIcon(file: File): Promise<Blob> {
   if (!CUSTOM_ICON_MIMES.has(file.type)) throw new IconError('自定义图标格式不支持，请选择 JPG、PNG 或 WebP。');
+  let bitmap: ImageBitmap | undefined;
   try {
-    const bitmap = await createImageBitmap(file);
+    bitmap = await createImageBitmap(file);
     const canvas = document.createElement('canvas');
     canvas.width = 128;
     canvas.height = 128;
@@ -37,23 +47,21 @@ export async function processCustomIcon(file: File): Promise<Blob> {
     const sx = (bitmap.width - size) / 2;
     const sy = (bitmap.height - size) / 2;
     context.drawImage(bitmap, sx, sy, size, size, 0, 0, 128, 128);
-    bitmap.close();
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.88));
     if (!blob) throw new Error('encode failed');
     return blob;
   } catch (error) {
     if (error instanceof IconError) throw error;
     throw new IconError('自定义图标无法读取或处理。');
+  } finally {
+    bitmap?.close();
   }
 }
 
 export async function saveCustomIcon(blob: Blob): Promise<string> {
   const id = crypto.randomUUID();
   try {
-    const db = await openDb();
-    const request = db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(blob, id);
-    await requestDone(request);
-    db.close();
+    await runStoreTransaction('readwrite', (store) => store.put(blob, id));
     return id;
   } catch {
     throw new IconError('自定义图标保存失败，快捷方式未添加。');
@@ -61,23 +69,10 @@ export async function saveCustomIcon(blob: Blob): Promise<string> {
 }
 
 export async function getCustomIcon(id: string): Promise<Blob | null> {
-  const db = await openDb();
-  return new Promise((resolve) => {
-    const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(id);
-    request.onsuccess = () => {
-      resolve(request.result instanceof Blob ? request.result : null);
-      db.close();
-    };
-    request.onerror = () => {
-      resolve(null);
-      db.close();
-    };
-  });
+  const value = await runStoreTransaction('readonly', (store) => store.get(id));
+  return value instanceof Blob ? value : null;
 }
 
 export async function deleteCustomIcon(id: string): Promise<void> {
-  const db = await openDb();
-  const request = db.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).delete(id);
-  await requestDone(request);
-  db.close();
+  await runStoreTransaction('readwrite', (store) => store.delete(id));
 }

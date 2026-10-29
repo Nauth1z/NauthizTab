@@ -19,45 +19,31 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type FormEvent,
   type MouseEvent,
-  type PointerEvent as ReactPointerEvent,
-  type TransitionEvent,
 } from 'react';
 import {
-  DEFAULT_SEARCH_SLOT,
-  GRID_COLUMNS,
   GRID_ROWS,
   GRID_SLOTS,
-  MAX_SHORTCUTS,
-  SEARCH_DRAG_HOLD_MS,
-  SEARCH_DRAG_TOLERANCE_PX,
   SEARCH_PROVIDERS,
   SEARCH_WIDGET_COLUMNS,
 } from './constants';
 import { ShortcutIcon } from './components/ShortcutIcon';
-import { positionToSlot, reflowShortcutsForSearch, searchWidgetSlots, slotToPosition } from './lib/layout';
+import { SettingsPanel } from './components/SettingsPanel';
+import { ConfirmDialog, ShortcutIconDialog, ShortcutTextDialog } from './components/ShortcutDialogs';
+import { useAppData } from './hooks/useAppData';
+import { useWallpaper } from './hooks/useWallpaper';
+import { useSearchDrag } from './hooks/useSearchDrag';
+import { useShortcutMoves } from './hooks/useShortcutMoves';
+import { useMenuNavigation } from './hooks/useMenuNavigation';
+import { reflowShortcutsForSearch, searchWidgetSlots, slotToPosition } from './lib/layout';
 import { buildSearchUrl } from './lib/search';
-import { firstEmptySlot, moveOrSwapShortcut, nameFromUrl, normalizeShortcutUrl, ShortcutValidationError } from './lib/shortcuts';
-import { loadAppData, saveLayout, saveSearchProvider, saveShortcuts } from './storage/appStorage';
+import { nameFromUrl, normalizeShortcutUrl, ShortcutValidationError } from './lib/shortcuts';
+import { addStoredShortcut, removeStoredShortcut, saveSearchLayout, saveSearchProvider, updateStoredShortcut, updateStoredShortcutIcon } from './storage/appStorage';
 import { deleteCustomIcon, processCustomIcon, saveCustomIcon } from './storage/iconStore';
-import { cleanupWallpaperFiles, deleteWallpaper, importWallpaper, loadWallpaperFile, WallpaperError } from './storage/wallpaperStore';
-import type { IconMode, SearchProviderId, Shortcut, WallpaperMetadata, WallpaperType } from './types';
+import { cleanupWallpaperFiles, deleteWallpaper, importWallpaper, WallpaperError } from './storage/wallpaperStore';
+import type { IconMode, SearchProviderId, Shortcut, WallpaperType } from './types';
 
 interface ContextState { shortcut: Shortcut; x: number; y: number }
-interface SearchLayout { searchSlot: number; shortcuts: Shortcut[] }
-interface SearchDragSession {
-  pointerId: number;
-  timerId: number;
-  activated: boolean;
-  startX: number;
-  startY: number;
-  offsetX: number;
-  offsetY: number;
-  origin: SearchLayout;
-  input: HTMLInputElement;
-}
-
 const shortcutDropAnimation: DropAnimation = {
   duration: 220,
   easing: 'cubic-bezier(.2, .72, .2, 1)',
@@ -92,8 +78,9 @@ function CheckIcon() {
   );
 }
 
-function DraggableShortcut({ shortcut, onContextMenu, onOpen }: {
+function DraggableShortcut({ shortcut, refreshKey, onContextMenu, onOpen }: {
   shortcut: Shortcut;
+  refreshKey: number;
   onContextMenu: (event: MouseEvent, shortcut: Shortcut) => void;
   onOpen: (shortcut: Shortcut) => void;
 }) {
@@ -111,7 +98,7 @@ function DraggableShortcut({ shortcut, onContextMenu, onOpen }: {
       {...listeners}
       {...attributes}
     >
-      <span className="shortcutIcon"><ShortcutIcon shortcut={shortcut} /></span>
+      <span className="shortcutIcon"><ShortcutIcon shortcut={shortcut} refreshKey={refreshKey} /></span>
       <span className="shortcutName">{shortcut.name}</span>
     </button>
   );
@@ -146,8 +133,9 @@ function useGridMoveAnimation(slot: number, skipAnimation = false, duration = 26
   return nodeRef;
 }
 
-function PositionedShortcut({ shortcut, skipLayoutAnimation, onContextMenu, onOpen }: {
+function PositionedShortcut({ shortcut, refreshKey, skipLayoutAnimation, onContextMenu, onOpen }: {
   shortcut: Shortcut;
+  refreshKey: number;
   skipLayoutAnimation: boolean;
   onContextMenu: (event: MouseEvent, shortcut: Shortcut) => void;
   onOpen: (shortcut: Shortcut) => void;
@@ -155,7 +143,7 @@ function PositionedShortcut({ shortcut, skipLayoutAnimation, onContextMenu, onOp
   const layoutRef = useGridMoveAnimation(shortcut.slot, skipLayoutAnimation);
   return (
     <div ref={layoutRef} className="shortcutPosition" style={gridPlacement(shortcut.slot)}>
-      <DraggableShortcut shortcut={shortcut} onContextMenu={onContextMenu} onOpen={onOpen} />
+      <DraggableShortcut shortcut={shortcut} refreshKey={refreshKey} onContextMenu={onContextMenu} onOpen={onOpen} />
     </div>
   );
 }
@@ -175,37 +163,34 @@ function GridSlot({ slot, reserved }: {
 }
 
 export default function App() {
-  const [ready, setReady] = useState(false);
-  const [provider, setProvider] = useState<SearchProviderId>('bing');
   const [query, setQuery] = useState('');
   const [providerOpen, setProviderOpen] = useState(false);
+  const [pendingProvider, setPendingProvider] = useState<{ id: SearchProviderId } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsMounted, setSettingsMounted] = useState(false);
-  const [shortcuts, setShortcuts] = useState<Shortcut[]>([]);
-  const [searchSlot, setSearchSlot] = useState(DEFAULT_SEARCH_SLOT);
-  const [searchPreview, setSearchPreview] = useState<SearchLayout | null>(null);
-  const [searchHolding, setSearchHolding] = useState(false);
-  const [searchDragging, setSearchDragging] = useState(false);
-  const [wallpaper, setWallpaper] = useState<WallpaperMetadata | null>(null);
-  const [wallpaperUrl, setWallpaperUrl] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [settlingShortcutId, setSettlingShortcutId] = useState<string | null>(null);
   const [gridLift, setGridLift] = useState(0);
   const [contextMenu, setContextMenu] = useState<ContextState | null>(null);
   const [renameTarget, setRenameTarget] = useState<Shortcut | null>(null);
+  const [urlTarget, setUrlTarget] = useState<Shortcut | null>(null);
+  const [iconTarget, setIconTarget] = useState<Shortcut | null>(null);
+  const [iconRefresh, setIconRefresh] = useState<Record<string, number>>({});
   const [deleteTarget, setDeleteTarget] = useState<Shortcut | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const justDragged = useRef(false);
-  const suppressSearchClick = useRef(false);
-  const searchDragSession = useRef<SearchDragSession | null>(null);
-  const searchPreviewRef = useRef<SearchLayout | null>(null);
   const desktopGridRef = useRef<HTMLDivElement>(null);
   const gridLiftRef = useRef(0);
   const searchWidgetRef = useRef<HTMLDivElement>(null);
   const providerMenuRef = useRef<HTMLDivElement>(null);
   const contextRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const contextTrigger = useRef<HTMLElement | null>(null);
+  const providerListRef = useRef<HTMLDivElement>(null);
+  const providerTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsFrameRef = useRef<number | null>(null);
+  const settingsCloseTimerRef = useRef<number | null>(null);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 7 } }));
 
   useLayoutEffect(() => {
@@ -236,20 +221,63 @@ export default function App() {
     setNotice(null);
   }, []);
 
+  const { data, ready, applyData } = useAppData(showError);
+  const { preferences: { searchProvider: savedProvider }, shortcuts, layout: { searchSlot }, wallpaperMetadata: wallpaper } = data;
+  const provider = pendingProvider?.id ?? savedProvider;
+  const shortcutMoves = useShortcutMoves(shortcuts, searchSlot, applyData, showError);
+  const { url: wallpaperUrl, videoRef } = useWallpaper(wallpaper, showError);
+  const {
+    preview: searchPreview, holding: searchHolding, dragging: searchDragging,
+    suppressClick: suppressSearchClick, begin: beginSearchHold, move: moveSearchPointer,
+    end: endSearchPointer, cancel: cancelSearchPointer,
+  } = useSearchDrag({ searchSlot, query, providerOpen, gridRef: desktopGridRef, widgetRef: searchWidgetRef,
+    onSave: async (slot) => { applyData(await saveSearchLayout(slot)); }, onError: showError });
+  useMenuNavigation(contextRef, !!contextMenu);
+  useMenuNavigation(providerListRef, providerOpen);
+
   const closeSettings = useCallback(() => {
+    if (settingsCloseTimerRef.current !== null) window.clearTimeout(settingsCloseTimerRef.current);
+    if (settingsFrameRef.current !== null) {
+      window.cancelAnimationFrame(settingsFrameRef.current);
+      settingsFrameRef.current = null;
+      setSettingsMounted(false);
+    }
     setSettingsOpen(false);
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) setSettingsMounted(false);
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setSettingsMounted(false);
+      settingsCloseTimerRef.current = null;
+    } else {
+      // Interrupted or skipped CSS transitions may never emit transitionend.
+      settingsCloseTimerRef.current = window.setTimeout(() => {
+        settingsCloseTimerRef.current = null;
+        setSettingsMounted(false);
+      }, 320);
+    }
   }, []);
 
   const openSettings = useCallback(() => {
-    setSettingsMounted(true);
-    window.requestAnimationFrame(() => setSettingsOpen(true));
+    if (settingsCloseTimerRef.current !== null) {
+      window.clearTimeout(settingsCloseTimerRef.current);
+      settingsCloseTimerRef.current = null;
+    }
+    if (settingsMounted) setSettingsOpen(true);
+    else setSettingsMounted(true);
+  }, [settingsMounted]);
+
+  useEffect(() => () => {
+    if (settingsCloseTimerRef.current !== null) window.clearTimeout(settingsCloseTimerRef.current);
   }, []);
 
   useEffect(() => {
     if (!settingsMounted) return;
-    const frame = window.requestAnimationFrame(() => setSettingsOpen(true));
-    return () => window.cancelAnimationFrame(frame);
+    settingsFrameRef.current = window.requestAnimationFrame(() => {
+      settingsFrameRef.current = null;
+      setSettingsOpen(true);
+    });
+    return () => {
+      if (settingsFrameRef.current !== null) window.cancelAnimationFrame(settingsFrameRef.current);
+      settingsFrameRef.current = null;
+    };
   }, [settingsMounted]);
 
   useEffect(() => {
@@ -259,46 +287,8 @@ export default function App() {
   }, [notice]);
 
   useEffect(() => {
-    loadAppData().then((data) => {
-      setProvider(data.preferences.searchProvider);
-      setShortcuts(data.shortcuts);
-      setSearchSlot(data.layout.searchSlot);
-      setWallpaper(data.wallpaperMetadata);
-      cleanupWallpaperFiles(data.wallpaperMetadata?.opfsFileName ?? null).catch(() => undefined);
-      setReady(true);
-    }).catch(() => {
-      showError('本地设置读取失败，请重新打开新标签页。');
-      setReady(true);
-    });
-  }, [showError]);
-
-  useEffect(() => {
-    let active = true;
-    let objectUrl: string | null = null;
-    setWallpaperUrl(null);
-    if (wallpaper) {
-      loadWallpaperFile(wallpaper).then((file) => {
-        if (!active) return;
-        objectUrl = URL.createObjectURL(file);
-        setWallpaperUrl(objectUrl);
-      }).catch((reason: unknown) => active && showError(reason instanceof Error ? reason.message : '壁纸读取失败。'));
-    }
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [wallpaper, showError]);
-
-  useEffect(() => {
-    const onVisibility = () => {
-      const video = videoRef.current;
-      if (!video) return;
-      if (document.hidden) video.pause();
-      else void video.play().catch(() => undefined);
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, []);
+    if (ready) void cleanupWallpaperFiles().catch(() => undefined);
+  }, [ready]);
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -307,11 +297,13 @@ export default function App() {
       if (contextMenu && !contextRef.current?.contains(target)) setContextMenu(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setProviderOpen(false);
-      setContextMenu(null);
-      setRenameTarget(null);
-      setDeleteTarget(null);
+      if (event.key !== 'Escape' || event.isComposing) return;
+      if (renameTarget || urlTarget || iconTarget || deleteTarget) {
+        setRenameTarget(null); setUrlTarget(null); setIconTarget(null); setDeleteTarget(null);
+        return;
+      }
+      if (contextMenu) { setContextMenu(null); contextTrigger.current?.focus(); return; }
+      if (providerOpen) { setProviderOpen(false); providerTriggerRef.current?.focus(); return; }
       closeSettings();
     };
     const onBlur = () => setContextMenu(null);
@@ -323,12 +315,14 @@ export default function App() {
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('blur', onBlur);
     };
-  }, [closeSettings, contextMenu, providerOpen]);
+  }, [closeSettings, contextMenu, providerOpen, renameTarget, urlTarget, iconTarget, deleteTarget]);
 
-  const visibleShortcuts = searchPreview?.shortcuts ?? shortcuts;
   const visibleSearchSlot = searchPreview?.searchSlot ?? searchSlot;
+  const visibleShortcuts = useMemo(
+    () => reflowShortcutsForSearch(shortcutMoves.shortcuts, visibleSearchSlot), [shortcutMoves.shortcuts, visibleSearchSlot],
+  );
   const reservedSearchSlots = useMemo(() => new Set(searchWidgetSlots(visibleSearchSlot)), [visibleSearchSlot]);
-  const activeShortcut = activeId ? shortcuts.find((item) => item.id === activeId) : undefined;
+  const activeShortcut = activeId ? visibleShortcuts.find((item) => item.id === activeId) : undefined;
   const searchMoveAnimationRef = useGridMoveAnimation(visibleSearchSlot, false, 170);
   const setSearchWidgetNode = useCallback((node: HTMLDivElement | null) => {
     searchWidgetRef.current = node;
@@ -341,133 +335,14 @@ export default function App() {
   };
 
   const selectProvider = async (id: SearchProviderId) => {
-    const previous = provider;
-    setProvider(id);
+    const selection = { id };
+    setPendingProvider(selection);
     setProviderOpen(false);
-    try {
-      await saveSearchProvider(id);
-    } catch {
-      setProvider(previous);
-      showError('搜索提供商保存失败。');
-    }
+    providerTriggerRef.current?.focus();
+    try { applyData(await saveSearchProvider(id)); }
+    catch { showError('搜索提供商保存失败。'); }
+    finally { setPendingProvider((current) => current === selection ? null : current); }
   };
-
-  const searchSlotFromPointer = useCallback((clientX: number, clientY: number, session: SearchDragSession) => {
-    const grid = desktopGridRef.current;
-    if (!grid) return session.origin.searchSlot;
-    const rect = grid.getBoundingClientRect();
-    const computed = window.getComputedStyle(grid);
-    const columnGap = Number.parseFloat(computed.columnGap) || 0;
-    const rowGap = Number.parseFloat(computed.rowGap) || 0;
-    const cellWidth = (rect.width - columnGap * (GRID_COLUMNS - 1)) / GRID_COLUMNS;
-    const cellHeight = (rect.height - rowGap * (GRID_ROWS - 1)) / GRID_ROWS;
-    const columnStep = cellWidth + columnGap;
-    const rowStep = cellHeight + rowGap;
-    const column = Math.max(0, Math.min(
-      GRID_COLUMNS - SEARCH_WIDGET_COLUMNS,
-      Math.round((clientX - session.offsetX - rect.left) / columnStep),
-    ));
-    const row = Math.max(0, Math.min(
-      GRID_ROWS - 1,
-      Math.round((clientY - session.offsetY - rect.top) / rowStep),
-    ));
-    return positionToSlot(column, row);
-  }, []);
-
-  const beginSearchHold = (event: ReactPointerEvent<HTMLInputElement>) => {
-    if ((event.pointerType === 'mouse' && event.button !== 0) || query.length > 0 || providerOpen || searchDragging) return;
-    const widget = searchWidgetRef.current;
-    if (!widget) return;
-    const widgetRect = widget.getBoundingClientRect();
-    const input = event.currentTarget;
-    try { input.setPointerCapture(event.pointerId); } catch { return; }
-    setSearchHolding(true);
-    const session: SearchDragSession = {
-      pointerId: event.pointerId,
-      timerId: 0,
-      activated: false,
-      startX: event.clientX,
-      startY: event.clientY,
-      offsetX: event.clientX - widgetRect.left,
-      offsetY: event.clientY - widgetRect.top,
-      origin: { searchSlot, shortcuts },
-      input,
-    };
-    session.timerId = window.setTimeout(() => {
-      if (searchDragSession.current !== session) return;
-      session.activated = true;
-      searchPreviewRef.current = session.origin;
-      setSearchPreview(session.origin);
-      setSearchHolding(false);
-      setSearchDragging(true);
-      input.blur();
-    }, SEARCH_DRAG_HOLD_MS);
-    searchDragSession.current = session;
-  };
-
-  const moveSearchPointer = (event: ReactPointerEvent<HTMLInputElement>) => {
-    const session = searchDragSession.current;
-    if (!session || session.pointerId !== event.pointerId) return;
-    if (!session.activated) {
-      const distance = Math.hypot(event.clientX - session.startX, event.clientY - session.startY);
-      if (distance <= SEARCH_DRAG_TOLERANCE_PX) return;
-      window.clearTimeout(session.timerId);
-      searchDragSession.current = null;
-      setSearchHolding(false);
-      if (session.input.hasPointerCapture(session.pointerId)) session.input.releasePointerCapture(session.pointerId);
-      return;
-    }
-    event.preventDefault();
-    const nextSearchSlot = searchSlotFromPointer(event.clientX, event.clientY, session);
-    if (searchPreviewRef.current?.searchSlot === nextSearchSlot) return;
-    const nextLayout = {
-      searchSlot: nextSearchSlot,
-      shortcuts: reflowShortcutsForSearch(session.origin.shortcuts, nextSearchSlot),
-    };
-    searchPreviewRef.current = nextLayout;
-    setSearchPreview(nextLayout);
-  };
-
-  const endSearchPointer = (event: ReactPointerEvent<HTMLInputElement>) => {
-    const session = searchDragSession.current;
-    if (!session || session.pointerId !== event.pointerId) return;
-    window.clearTimeout(session.timerId);
-    searchDragSession.current = null;
-    setSearchHolding(false);
-    if (session.input.hasPointerCapture(session.pointerId)) session.input.releasePointerCapture(session.pointerId);
-    if (!session.activated) return;
-    event.preventDefault();
-    const nextLayout = searchPreviewRef.current ?? session.origin;
-    searchPreviewRef.current = null;
-    setSearchPreview(null);
-    setSearchDragging(false);
-    setSearchSlot(nextLayout.searchSlot);
-    setShortcuts(nextLayout.shortcuts);
-    suppressSearchClick.current = true;
-    window.setTimeout(() => { suppressSearchClick.current = false; }, 120);
-    if (nextLayout.searchSlot === session.origin.searchSlot && nextLayout.shortcuts === session.origin.shortcuts) return;
-    void saveLayout(nextLayout.shortcuts, nextLayout.searchSlot).catch(() => {
-      setSearchSlot(session.origin.searchSlot);
-      setShortcuts(session.origin.shortcuts);
-      showError('桌面布局保存失败，已恢复原位置。');
-    });
-  };
-
-  const cancelSearchPointer = (event: ReactPointerEvent<HTMLInputElement>) => {
-    const session = searchDragSession.current;
-    if (!session || session.pointerId !== event.pointerId) return;
-    window.clearTimeout(session.timerId);
-    searchDragSession.current = null;
-    searchPreviewRef.current = null;
-    setSearchPreview(null);
-    setSearchHolding(false);
-    setSearchDragging(false);
-  };
-
-  useEffect(() => () => {
-    const session = searchDragSession.current;
-    if (session) window.clearTimeout(session.timerId);
-  }, []);
 
   const openShortcut = (shortcut: Shortcut) => {
     if (justDragged.current) return;
@@ -481,29 +356,21 @@ export default function App() {
     setContextMenu(null);
   };
 
-  const onDragEnd = async (event: DragEndEvent) => {
+  const onDragEnd = (event: DragEndEvent) => {
     setActiveId(null);
     window.setTimeout(() => { justDragged.current = false; }, 120);
     const slot = event.over?.data.current?.slot;
     if (typeof slot !== 'number') return;
-    const previous = shortcuts;
-    const next = moveOrSwapShortcut(shortcuts, String(event.active.id), slot, new Set(searchWidgetSlots(searchSlot)));
-    if (next === previous) return;
+    if (!shortcutMoves.move(String(event.active.id), slot, visibleSearchSlot)) return;
     setSettlingShortcutId(String(event.active.id));
-    setShortcuts(next);
     window.requestAnimationFrame(() => setSettlingShortcutId(null));
-    try {
-      await saveShortcuts(next);
-    } catch {
-      setShortcuts(previous);
-      showError('快捷方式位置保存失败。');
-    }
   };
 
   const openContextMenu = (event: MouseEvent, shortcut: Shortcut) => {
     event.preventDefault();
+    contextTrigger.current = event.currentTarget as HTMLElement;
     const width = 170;
-    const height = 104;
+    const height = 232;
     setContextMenu({
       shortcut,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
@@ -513,54 +380,54 @@ export default function App() {
 
   const renameShortcut = async (name: string) => {
     if (!renameTarget || !name.trim()) return;
-    const next = shortcuts.map((item) => item.id === renameTarget.id ? { ...item, name: name.trim() } : item);
-    try {
-      await saveShortcuts(next);
-      setShortcuts(next);
-      setRenameTarget(null);
-    } catch {
-      showError('名称保存失败。');
-    }
+    applyData(await updateStoredShortcut(renameTarget.id, { name: name.trim() }));
+    setRenameTarget(null);
+  };
+
+  const updateShortcutUrl = async (input: string) => {
+    if (!urlTarget) return;
+    const url = normalizeShortcutUrl(input);
+    try { applyData(await updateStoredShortcut(urlTarget.id, { url })); }
+    catch { throw new Error('域名保存失败，请重试。'); }
+    setUrlTarget(null);
   };
 
   const confirmDelete = async () => {
     if (!deleteTarget) return;
-    const next = shortcuts.filter((item) => item.id !== deleteTarget.id);
+    const next = await removeStoredShortcut(deleteTarget.id);
+    applyData(next);
+    setDeleteTarget(null);
+  };
+
+  const updateShortcutIcon = async (mode: IconMode, file: File | null) => {
+    if (!iconTarget) return;
+    const customIconId = mode === 'custom' && file ? await saveCustomIcon(await processCustomIcon(file)) : undefined;
     try {
-      await saveShortcuts(next);
-      setShortcuts(next);
-      if (deleteTarget.customIconId && !next.some((item) => item.customIconId === deleteTarget.customIconId)) {
-        await deleteCustomIcon(deleteTarget.customIconId).catch(() => undefined);
-      }
-      setDeleteTarget(null);
-    } catch {
-      showError('快捷方式删除失败。');
+      applyData(await updateStoredShortcutIcon(iconTarget.id, mode, customIconId));
+    } catch (error) {
+      if (file && customIconId) await deleteCustomIcon(customIconId).catch(() => undefined);
+      throw error;
     }
+    setIconTarget(null);
   };
 
   const addShortcut = async (values: { name: string; url: string; mode: IconMode; iconFile: File | null }) => {
-    if (shortcuts.length >= MAX_SHORTCUTS) throw new ShortcutValidationError('最多只能添加 24 个快捷方式。');
-    const slot = firstEmptySlot(shortcuts, new Set(searchWidgetSlots(searchSlot)));
-    if (slot === null) throw new ShortcutValidationError('最多只能添加 24 个快捷方式。');
     const url = normalizeShortcutUrl(values.url);
     let customIconId: string | undefined;
     if (values.mode === 'custom') {
       if (!values.iconFile) throw new ShortcutValidationError('请选择自定义图标。');
       customIconId = await saveCustomIcon(await processCustomIcon(values.iconFile));
     }
-    const shortcut: Shortcut = {
+    const shortcut: Omit<Shortcut, 'slot'> = {
       id: crypto.randomUUID(),
       name: values.name.trim() || nameFromUrl(url),
       url,
       iconMode: values.mode,
       customIconId,
-      slot,
       createdAt: Date.now(),
     };
-    const next = [...shortcuts, shortcut];
     try {
-      await saveShortcuts(next);
-      setShortcuts(next);
+      applyData(await addStoredShortcut(shortcut));
       setNotice('快捷方式已添加。');
       setError(null);
     } catch (reason) {
@@ -571,8 +438,7 @@ export default function App() {
 
   const changeWallpaper = async (file: File, type: WallpaperType) => {
     try {
-      const metadata = await importWallpaper(file, type, wallpaper);
-      setWallpaper(metadata);
+      applyData(await importWallpaper(file, type));
       setNotice('壁纸已更新。');
       setError(null);
     } catch (reason) {
@@ -582,8 +448,7 @@ export default function App() {
 
   const removeWallpaper = async () => {
     try {
-      await deleteWallpaper(wallpaper);
-      setWallpaper(null);
+      applyData(await deleteWallpaper());
       setNotice('已恢复默认背景。');
       setError(null);
     } catch {
@@ -596,7 +461,7 @@ export default function App() {
       <div className="wallpaperLayer">
         {wallpaperUrl && wallpaper?.type === 'image' && <img src={wallpaperUrl} alt="" />}
         {wallpaperUrl && wallpaper?.type === 'video' && (
-          <video ref={videoRef} src={wallpaperUrl} autoPlay muted loop playsInline onCanPlay={() => void videoRef.current?.play().catch(() => undefined)} />
+          <video ref={videoRef} src={wallpaperUrl} autoPlay muted loop playsInline onCanPlay={() => { if (!document.hidden) void videoRef.current?.play().catch(() => undefined); }} />
         )}
       </div>
       <div className="readabilityLayer" />
@@ -616,6 +481,7 @@ export default function App() {
               <PositionedShortcut
                 key={shortcut.id}
                 shortcut={shortcut}
+                refreshKey={iconRefresh[shortcut.id] ?? 0}
                 skipLayoutAnimation={shortcut.id === settlingShortcutId}
                 onContextMenu={openContextMenu}
                 onOpen={openShortcut}
@@ -628,7 +494,7 @@ export default function App() {
             >
               <div className="searchWrap">
                 <div className="providerWrap" ref={providerMenuRef}>
-                  <button className="providerButton" aria-label="选择搜索提供商" aria-expanded={providerOpen} onClick={() => setProviderOpen((open) => !open)}>
+                  <button ref={providerTriggerRef} className="providerButton" aria-label="选择搜索提供商" aria-expanded={providerOpen} onClick={() => setProviderOpen((open) => !open)}>
                     <svg
                       className={`providerChevron${providerOpen ? ' open' : ''}`}
                       viewBox="0 0 16 16"
@@ -639,7 +505,7 @@ export default function App() {
                     </svg>
                   </button>
                   {providerOpen && (
-                    <div className="providerMenu" role="menu">
+                    <div ref={providerListRef} className="providerMenu" role="menu">
                       {SEARCH_PROVIDERS.map((item) => (
                         <button key={item.id} role="menuitemradio" aria-checked={provider === item.id} onClick={() => void selectProvider(item.id)}>
                           <span>{item.name}</span><span className="check">{provider === item.id && <CheckIcon />}</span>
@@ -651,7 +517,7 @@ export default function App() {
                 <input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  onKeyDown={(event) => { if (event.key === 'Enter') search(); }}
+                  onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) search(); }}
                   onPointerDown={beginSearchHold}
                   onPointerMove={moveSearchPointer}
                   onPointerUp={endSearchPointer}
@@ -677,6 +543,8 @@ export default function App() {
       </section>
 
       <button
+        ref={settingsTriggerRef}
+        data-focus-fallback
         className={`settingsButton${settingsOpen ? ' open' : ''}`}
         aria-label={settingsOpen ? '关闭设置' : '打开设置'}
         aria-expanded={settingsOpen}
@@ -690,9 +558,12 @@ export default function App() {
         <div
           className={`drawerBackdrop${settingsOpen ? ' open' : ''}`}
           aria-hidden={!settingsOpen}
+          inert={!settingsOpen}
           onMouseDown={(event) => { if (event.target === event.currentTarget) closeSettings(); }}
         >
           <SettingsPanel
+            open={settingsOpen}
+            restoreTarget={settingsTriggerRef.current}
             wallpaper={wallpaper}
             shortcutCount={shortcuts.length}
             onClose={closeSettings}
@@ -701,7 +572,11 @@ export default function App() {
             onDeleteWallpaper={removeWallpaper}
             onError={showError}
             onTransitionEnd={(event) => {
-              if (!settingsOpen && event.target === event.currentTarget && event.propertyName === 'transform') setSettingsMounted(false);
+              if (!settingsOpen && event.target === event.currentTarget && event.propertyName === 'transform') {
+                if (settingsCloseTimerRef.current !== null) window.clearTimeout(settingsCloseTimerRef.current);
+                settingsCloseTimerRef.current = null;
+                setSettingsMounted(false);
+              }
             }}
           />
         </div>
@@ -710,112 +585,16 @@ export default function App() {
       {contextMenu && (
         <div ref={contextRef} className="contextMenu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu">
           <button role="menuitem" onClick={() => { setRenameTarget(contextMenu.shortcut); setContextMenu(null); }}>修改名称</button>
+          <button role="menuitem" onClick={() => { setUrlTarget(contextMenu.shortcut); setContextMenu(null); }}>修改域名</button>
+          <button role="menuitem" onClick={() => { setIconTarget(contextMenu.shortcut); setContextMenu(null); }}>修改图标</button>
+          <button role="menuitem" onClick={() => { const id = contextMenu.shortcut.id; setIconRefresh((current) => ({ ...current, [id]: (current[id] ?? 0) + 1 })); setContextMenu(null); contextTrigger.current?.focus(); }}>刷新图标</button>
           <button role="menuitem" className="dangerText" onClick={() => { setDeleteTarget(contextMenu.shortcut); setContextMenu(null); }}>删除</button>
         </div>
       )}
-      {renameTarget && <RenameDialog shortcut={renameTarget} onClose={() => setRenameTarget(null)} onSave={renameShortcut} />}
-      {deleteTarget && <ConfirmDialog name={deleteTarget.name} onClose={() => setDeleteTarget(null)} onConfirm={() => void confirmDelete()} />}
+      {renameTarget && <ShortcutTextDialog field="name" restoreTarget={contextTrigger.current} shortcut={renameTarget} onClose={() => setRenameTarget(null)} onSave={renameShortcut} />}
+      {urlTarget && <ShortcutTextDialog field="url" restoreTarget={contextTrigger.current} shortcut={urlTarget} onClose={() => setUrlTarget(null)} onSave={updateShortcutUrl} />}
+      {iconTarget && <ShortcutIconDialog shortcut={iconTarget} restoreTarget={contextTrigger.current} onClose={() => setIconTarget(null)} onSave={updateShortcutIcon} />}
+      {deleteTarget && <ConfirmDialog restoreTarget={contextTrigger.current} name={deleteTarget.name} onClose={() => setDeleteTarget(null)} onConfirm={confirmDelete} />}
     </main>
-  );
-}
-
-function SettingsPanel({ wallpaper, shortcutCount, onClose, onAdd, onWallpaper, onDeleteWallpaper, onError, onTransitionEnd }: {
-  wallpaper: WallpaperMetadata | null;
-  shortcutCount: number;
-  onClose: () => void;
-  onAdd: (values: { name: string; url: string; mode: IconMode; iconFile: File | null }) => Promise<void>;
-  onWallpaper: (file: File, type: WallpaperType) => Promise<void>;
-  onDeleteWallpaper: () => Promise<void>;
-  onError: (message: string) => void;
-  onTransitionEnd: (event: TransitionEvent<HTMLElement>) => void;
-}) {
-  const [name, setName] = useState('');
-  const [url, setUrl] = useState('');
-  const [mode, setMode] = useState<IconMode>('favicon');
-  const [iconFile, setIconFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
-  const iconInput = useRef<HTMLInputElement>(null);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setFormError(null);
-    try {
-      await onAdd({ name, url, mode, iconFile });
-      setName(''); setUrl(''); setMode('favicon'); setIconFile(null);
-      if (iconInput.current) iconInput.current.value = '';
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : '快捷方式添加失败。';
-      setFormError(message);
-      onError(message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const selectWallpaper = (type: WallpaperType) => async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    setBusy(true);
-    await onWallpaper(file, type);
-    setBusy(false);
-  };
-
-  return (
-    <aside id="settings-panel" className="settingsPanel" role="dialog" aria-modal="true" aria-label="设置" onTransitionEnd={onTransitionEnd}>
-      <header><h2>设置</h2><button className="closeButton" aria-label="关闭设置" onClick={onClose}>×</button></header>
-      <section>
-        <h3>壁纸</h3>
-        <p className="metadata">当前：{wallpaper ? `${wallpaper.type === 'image' ? '静态图片' : '动态视频'} · ${wallpaper.fileName}` : '默认背景'}</p>
-        <div className="wallpaperActions">
-          <label className={`actionButton ${busy ? 'disabled' : ''}`}>选择静态壁纸<input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" disabled={busy} onChange={selectWallpaper('image')} /></label>
-          <label className={`actionButton ${busy ? 'disabled' : ''}`}>选择动态壁纸<input type="file" accept=".mp4,.webm,video/mp4,video/webm" disabled={busy} onChange={selectWallpaper('video')} /></label>
-          <button className="secondaryButton" disabled={busy || !wallpaper} onClick={() => void onDeleteWallpaper()}>删除当前壁纸</button>
-        </div>
-        <p className="hint">图片最大 30 MB；视频最大 200 MB。文件只保存在本机。</p>
-      </section>
-      <section>
-        <div className="sectionTitle"><h3>添加快捷方式</h3><span>{shortcutCount}/{MAX_SHORTCUTS}</span></div>
-        {shortcutCount >= MAX_SHORTCUTS && <p className="inlineError">最多只能添加 24 个快捷方式。</p>}
-        <form onSubmit={(event) => void submit(event)}>
-          <label>名称（可选）<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="留空时使用域名" /></label>
-          <label>URL<input value={url} onChange={(event) => setUrl(event.target.value)} required placeholder="example.com" inputMode="url" /></label>
-          <fieldset>
-            <legend>图标</legend>
-            <label className="radio"><input type="radio" name="iconMode" checked={mode === 'favicon'} onChange={() => setMode('favicon')} /> 自动获取 favicon</label>
-            <label className="radio"><input type="radio" name="iconMode" checked={mode === 'custom'} onChange={() => setMode('custom')} /> 上传自定义图标</label>
-          </fieldset>
-          {mode === 'custom' && <label>图标文件<input ref={iconInput} type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" onChange={(event) => setIconFile(event.target.files?.[0] ?? null)} /></label>}
-          {formError && <p className="inlineError" role="alert">{formError}</p>}
-          <button className="primaryButton" type="submit" disabled={busy || shortcutCount >= MAX_SHORTCUTS}>{busy ? '处理中…' : '添加快捷方式'}</button>
-        </form>
-      </section>
-    </aside>
-  );
-}
-
-function RenameDialog({ shortcut, onClose, onSave }: { shortcut: Shortcut; onClose: () => void; onSave: (name: string) => Promise<void> }) {
-  const [name, setName] = useState(shortcut.name);
-  return (
-    <div className="modalBackdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <form className="dialog" onSubmit={(event) => { event.preventDefault(); void onSave(name); }}>
-        <h2>修改名称</h2>
-        <label>名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} maxLength={80} /></label>
-        <div className="dialogActions"><button type="button" className="secondaryButton" onClick={onClose}>取消</button><button className="primaryButton" disabled={!name.trim()}>保存</button></div>
-      </form>
-    </div>
-  );
-}
-
-function ConfirmDialog({ name, onClose, onConfirm }: { name: string; onClose: () => void; onConfirm: () => void }) {
-  return (
-    <div className="modalBackdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title">
-        <h2 id="delete-title">删除快捷方式？</h2><p>将删除“{name}”，原槽位会保持为空。</p>
-        <div className="dialogActions"><button className="secondaryButton" onClick={onClose}>取消</button><button className="dangerButton" onClick={onConfirm}>删除</button></div>
-      </div>
-    </div>
   );
 }
