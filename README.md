@@ -77,12 +77,6 @@ npm run build
 
 开发预览可运行 `npm run dev`。普通网页预览环境没有扩展专属的 `chrome.storage`、`favicon` 权限及完整 OPFS 隔离语义，因此功能验收应以加载 `dist` 扩展后的 Edge 新标签页为准。
 
-## 版本管理
-
-采用 `MAJOR.MINOR.PATCH` 语义化版本：不兼容变更递增主版本，兼容的新功能递增次版本，兼容的缺陷修复递增修订版本。每次更新须同步 `package.json`、`package-lock.json` 的项目版本（顶层及根包）、`public/manifest.json`、本说明中的当前版本和 `CHANGELOG.md`，并重新构建以更新 `dist/manifest.json`。构建产物不纳入 Git。
-
-应用版本与本地数据的 `schemaVersion` 独立管理；应用版本升级不要求修改数据结构版本。
-
 ## 在 Microsoft Edge 中运行
 
 1. 执行 `npm run build`，生成项目根目录下的 `dist` 文件夹。
